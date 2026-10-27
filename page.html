@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>deps</title>
+<style>
+  :root { --bg: #10151f; --panel: #182030; --text: #e8e6e1; --dim: #9aa3b2; --accent: #4fb3ff; --warn: #ffb060; --bad: #ff6b6b; --ok: #6bd18a; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font: 15px system-ui, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 0.8em 1em 6em; }
+  h1 { font-size: 1.2em; margin: 0.3em 0; }
+  h2 { font-size: 0.85em; color: var(--dim); text-transform: uppercase; letter-spacing: 0.04em; margin: 1.4em 0 0.4em; }
+  .summary { color: var(--dim); font-size: 0.9em; }
+  .item { display: flex; gap: 0.6em; align-items: flex-start; padding: 0.6em 0.5em; border-radius: 8px; background: var(--panel); margin: 0.35em 0; }
+  .item input { width: 1.3em; height: 1.3em; margin-top: 0.15em; flex: none; }
+  .item .name { font-weight: 600; }
+  .item .why { color: var(--dim); font-size: 0.85em; margin-top: 0.2em; overflow-wrap: anywhere; }
+  .tag { font-size: 0.75em; padding: 0.05em 0.45em; border-radius: 6px; margin-left: 0.3em; border: 1px solid currentColor; }
+  .stale { color: var(--warn); } .missing { color: var(--bad); } .behind { color: var(--accent); } .current { color: var(--ok); } .unmade { color: var(--dim); }
+  details summary { cursor: pointer; color: var(--dim); margin: 1.2em 0 0.4em; }
+  .bar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 0.5em; padding: 0.6em 1em; background: rgba(16, 21, 31, 0.95); border-top: 1px solid #2a3344; justify-content: center; }
+  button { font: inherit; color: var(--text); background: #2a3344; border: 1px solid #3d4a60; border-radius: 8px; padding: 0.5em 0.9em; }
+  button.go { background: var(--accent); color: #0b1220; border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: 0.4; }
+  pre { background: #0b0f17; border-radius: 8px; padding: 0.6em; font-size: 0.78em; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
+</style>
+</head>
+<body>
+<main>
+  <h1>deps</h1>
+  <div class="summary" id="summary">Loading…</div>
+  <div id="lists"></div>
+  <h2>Build log</h2>
+  <pre id="log">Nothing built yet.</pre>
+</main>
+<div class="bar">
+  <button id="allBtn">Tick all out of date</button>
+  <button id="noneBtn">None</button>
+  <button id="buildBtn" class="go">Build</button>
+</div>
+<script>
+// deps' page: what is out of date (from /status.json), ticked to build. Building runs each
+// ticked producer's own build command on the deps server, one at a time, in dependency order;
+// gptviz images are not built here (they are made in Obsidian).
+"use strict";
+const $ = id => document.getElementById(id);
+const ticked = new Set();
+let status = null, running = null, queue = [];
+let firstLoad = true;
+const label = key => key.replace(/^vault:/, "").replace(/^canopy:/, "Canopy ").replace(/^text:(.*)#(.*)$/, "$2 text in $1");
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+async function load() {
+    status = await (await fetch("/status.json")).json();
+    const outOfDate = status.producers.filter(p => p.buildable && ["stale", "missing", "behind"].includes(p.status));
+    if (firstLoad) {
+        outOfDate.forEach(p => ticked.add(p.id));
+        firstLoad = false;
+    }
+    render();
+}
+function render() {
+    const c = status.counts;
+    $("summary").textContent = `${c.stale} stale, ${c.missing} missing, ${c.behind} behind, ${c.unmade} not made, ${c.current} current. Checked ${new Date(status.generated).toLocaleTimeString()}.`;
+    const byName = id => (status.producers.find(p => p.id === id) || { name: id }).name;
+    const why = p => p.status === "stale" ? `${p.changed.map(label).join(", ")} changed`
+        : p.status === "missing" ? "an output is missing"
+        : p.status === "behind" ? `after ${p.behind.map(byName).join(", ")}`
+        : p.status === "unmade" ? "never generated: make it in Obsidian (gptviz)"
+        : p.builtAt ? `current since ${new Date(p.builtAt).toLocaleString()}` : "current";
+    const item = p => {
+        const box = p.buildable ? `<input type="checkbox" data-id="${esc(p.id)}" ${ticked.has(p.id) ? "checked" : ""}>` : `<input type="checkbox" disabled>`;
+        const state = p.id === running ? " · building…" : queue.includes(p.id) ? " · queued" : "";
+        return `<label class="item">${box}<div><div class="name">${esc(p.name)}<span class="tag ${p.status}">${p.status === "unmade" ? "not made" : p.status}</span></div>
+            <div class="why">${esc(p.kind)} · ${esc(p.where)} · ${esc(p.cost)}${state}</div><div class="why">${esc(why(p))}</div>
+            ${p.notes && p.notes.length ? `<div class="why missing">${esc(p.notes.join("; "))}</div>` : ""}</div></label>`;
+    };
+    const group = (title, list) => (list.length ? `<h2>${title}</h2>` + list.map(item).join("") : "");
+    const by = s => status.producers.filter(p => p.status === s);
+    const current = status.producers.filter(p => p.status === "current" && p.buildable);
+    $("lists").innerHTML = group("Stale", by("stale")) + group("Missing", by("missing")) + group("Behind", by("behind"))
+        + (by("stale").length + by("missing").length + by("behind").length === 0 ? "<h2>Out of date</h2><div class='summary'>Nothing. Tick something below to rebuild it anyway.</div>" : "")
+        + (current.length ? `<details><summary>Current, buildable (${current.length})</summary>${current.map(item).join("")}</details>` : "")
+        + (by("unmade").length ? `<details><summary>Not made: gptviz images (${by("unmade").length})</summary>${by("unmade").map(item).join("")}</details>` : "");
+    for (const box of document.querySelectorAll("input[data-id]")) {
+        box.onchange = () => {
+            if (box.checked) ticked.add(box.dataset.id);
+            else ticked.delete(box.dataset.id);
+            updateBar();
+        };
+    }
+    updateBar();
+}
+function updateBar() {
+    const n = [...ticked].filter(id => status.producers.some(p => p.id === id && p.buildable)).length;
+    $("buildBtn").textContent = running ? "Building…" : `Build ${n}`;
+    $("buildBtn").disabled = !n;
+}
+$("allBtn").onclick = () => {
+    status.producers.filter(p => p.buildable && ["stale", "missing", "behind"].includes(p.status)).forEach(p => ticked.add(p.id));
+    render();
+};
+$("noneBtn").onclick = () => {
+    ticked.clear();
+    render();
+};
+$("buildBtn").onclick = async () => {
+    const ids = [...ticked];
+    ticked.clear();
+    await fetch("/build", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }) });
+    render();
+};
+const log = [];
+const events = new EventSource("/events");
+events.addEventListener("status", () => load().catch(() => {}));
+events.addEventListener("build", e => {
+    const d = JSON.parse(e.data);
+    running = d.running;
+    queue = d.queue || [];
+    log.push(d.line);
+    if (log.length > 400) log.splice(0, log.length - 400);
+    $("log").textContent = log.join("\n");
+    $("log").scrollTop = $("log").scrollHeight;
+    if (status) render();
+});
+fetch("/build").then(r => r.json()).then(r => {
+    running = r.running;
+    queue = r.queue || [];
+    if (r.log.length) $("log").textContent = r.log.join("\n");
+}).catch(() => {});
+load().catch(error => ($("summary").textContent = `deps is not answering: ${error.message}`));
+</script>
+</body>
+</html>

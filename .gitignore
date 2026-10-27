@@ -1,0 +1,5 @@
+# The ledger and the status it gives are this device's own; deps.js remakes them.
+cache/
+status.json
+status.md
+deps.log
